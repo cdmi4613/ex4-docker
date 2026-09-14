@@ -1,0 +1,55 @@
+# 워크플로우 이름
+name: GitOps CI Pipeline
+
+# main 브랜치에 push되면 GitHub Actions 실행
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-and-update:
+    runs-on: ubuntu-latest
+
+    steps:
+      # GitHub Repository의 파일을 Actions 실행 환경으로 가져오기
+      - name: 소스코드 가져오기
+        uses: actions/checkout@v4
+
+      # GitHub Actions가 AWS 명령어를 사용할 수 있도록 AWS 인증
+      - name: AWS 자격 증명 설정
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      # SSM을 통해 Private EC2에서 Docker Nginx 컨테이너 배포
+      - name: 컨테이너 배포 및 S3 파일 싱크
+        run: |
+          aws ssm send-command \
+            --instance-ids "i-0ba28a7c5e7470ef2" \
+            --document-name "AWS-RunShellScript" \
+            --parameters "commands=[
+
+              # ① Private EC2에서 기존 Nginx와 Docker 컨테이너 정리
+              \"sudo systemctl stop nginx || true\",
+              \"docker stop nginx-container || true\",
+              \"docker rm nginx-container || true\",
+
+              # ② nginx:1.31.3-alpine 이미지 다운로드
+              # ③ 다운로드한 이미지로 nginx-container 컨테이너 실행
+              \"docker run -d --name nginx-container -p 80:80 nginx:1.31.3-alpine\",
+
+              # ④ S3의 index.html / images 등을 EC2 임시 폴더로 다운로드
+              \"sudo rm -rf /tmp/html\",
+              \"sudo mkdir -p /tmp/html\",
+              \"sudo aws s3 sync s3://std01-static-web-0914/ /tmp/html/\",
+
+              # ④ EC2 임시 폴더의 웹 파일을 Nginx 컨테이너 내부로 복사
+              \"docker cp /tmp/html/. nginx-container:/usr/share/nginx/html/\"
+
+              # ⑤ 실행 중인 컨테이너의 Nginx가 복사된 HTML을 웹으로 서비스
+            ]" \
+            --region "${{ secrets.AWS_REGION }}" \
+            --comment "Deploying Docker Nginx with SSM"
